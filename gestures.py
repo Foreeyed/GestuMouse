@@ -17,8 +17,8 @@ MODEL_PATH = "model.pkl"
 def extract_features(hand_landmarks):
     """Превращает 21 landmark руки в нормализованный вектор из 63 признаков.
 
-    Логика должна совпадать с collect_data.py (handMarker.py), иначе модель
-    получит данные в другом масштабе.
+    Логика должна совпадать с collect_data.py, иначе модель получит данные
+    в другом масштабе.
     """
     cords = np.array([[lm.x, lm.y, lm.z] for lm in hand_landmarks.landmark])
 

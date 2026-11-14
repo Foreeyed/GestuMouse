@@ -10,19 +10,14 @@ import pandas as pd
 import numpy as np
 from numpy.linalg import norm
 
+from gestures import GESTURES
+
 mp_drawing = mp.solutions.drawing_utils
 mp_hands = mp.solutions.hands
 
 is_recording = False
 last_save_time = 0
 SAVE_INTERVAL_SECONDS = 0.3
-
-GESTURES = {
-    0: "fist", # кулак
-    1: "open_hand", # открытая ладонь
-    2: "pointing", # указательный палец
-    3: "thumbs_up" # большой палец вверх
-}
 
 current_label_id = 0
 
