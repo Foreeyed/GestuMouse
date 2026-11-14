@@ -1,119 +1,109 @@
-import collections
-import mediapipe as mp
+"""GestuMouse: управление курсором мыши жестами руки."""
 
 import cv2
-import numpy as np
 
-camera = cv2.VideoCapture(0)
+from gestures import GestureClassifier
+from mouse_control import MouseController
+from tracking import HandTracker
 
-frame_count = 0
-# center_x, center_y = 960, 540
+# Сколько кадров подряд жест должен держаться, чтобы сработало действие (анти-дребезг)
+HOLD_FRAMES = 5
 
-roi_x1, roi_x2 = 760, 1160
-roi_y1, roi_y2 = 390, 690
-
-roi_w = roi_x2 - roi_x1
-roi_h = roi_y2 - roi_y1
-
-SCREEN_WIDTH, SCREEN_HEIGHT = 2560, 1600
-
-lower_red1 = np.array([0, 100, 100])
-upper_red1 = np.array([10, 255, 255])
-
-lower_red2 = np.array([160, 100, 100])
-upper_red2 = np.array([179, 255, 255])
-
-x_cords = collections.deque(maxlen=5)
-y_cords = collections.deque(maxlen=5)
+# Схема: жест -> действие
+GESTURE_ACTIONS = {
+    "pointing": "move",          # двигать курсор
+    "fist": "click",             # одиночный клик
+    "open_hand": "idle",         # ничего не делать
+    "thumbs_up": "double_click", # двойной клик
+}
 
 
-def from_roi_to_screen(local_cX, local_cY, roi_w, roi_h, screen_w, screen_h):
-    percent_x = local_cX / roi_w
-    percent_y = local_cY / roi_h
+def draw_status(frame, gesture, confidence, action):
+    """Показывает текущий жест и действие в углу кадра."""
+    if gesture is None:
+        text = "No hand detected"
+        color = (0, 0, 255)
+    else:
+        text = f"{gesture} ({confidence:.0%}) -> {action}"
+        color = (0, 255, 0)
 
-    local_screen_x = int(percent_x * screen_w)
-    local_screen_y = int(percent_y * screen_h)
-
-    screen_x = max(0, min(local_screen_x, screen_w - 1))
-    screen_y = max(0, min(local_screen_y, screen_h - 1))
-
-    return screen_x, screen_y
+    cv2.putText(frame, text, (10, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
 
 
-if camera.isOpened():
-    while camera.isOpened():
-        success, frame = camera.read()
-        if success:
-            max_global_cX, max_global_cY = 0, 0
-            screen_x, screen_y = 0, 0
+def main():
+    camera = cv2.VideoCapture(0)
+    if not camera.isOpened():
+        print("Не удалось открыть камеру.")
+        return
 
-            hsv_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+    classifier = GestureClassifier()
+    mouse = MouseController()
 
-            mask1 = cv2.inRange(hsv_frame, lower_red1, upper_red1)
-            mask2 = cv2.inRange(hsv_frame, lower_red2, upper_red2)
+    current_gesture = None
+    gesture_frames = 0
 
-            full_mask_frame = cv2.bitwise_or(mask1, mask2)
-            full_mask_roi = full_mask_frame[roi_y1:roi_y2, roi_x1:roi_x2]
+    try:
+        with HandTracker() as tracker:
+            while camera.isOpened():
+                success, frame = camera.read()
+                if not success:
+                    print("Не удалось получить кадр с веб-камеры.")
+                    continue
 
-            contours, _ = cv2.findContours(full_mask_roi, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                frame = cv2.flip(frame, 1)
+                frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                hand_landmarks = tracker.process(frame_rgb)
 
-            max_cnt = None
-            max_area = 0
+                display_gesture = None
+                confidence = 0.0
+                active_action = None
 
-            for cnt in contours:
-                area = cv2.contourArea(cnt)
-                if area > 100 and area > max_area:
-                    max_area = area
-                    max_cnt = cnt
+                if hand_landmarks is not None:
+                    gesture = classifier.predict(hand_landmarks)
+                    confidence = classifier.predict_proba(hand_landmarks)
+                    display_gesture = gesture
 
-            if max_cnt is not None:
-                max_M = cv2.moments(max_cnt)
-                if max_M["m00"] != 0:
-                    max_local_cX = int(max_M["m10"] / max_M["m00"])
-                    max_local_cY = int(max_M["m01"] / max_M["m00"])
+                    # Анти-дребезг: считаем жест активным после HOLD_FRAMES кадров подряд
+                    if gesture == current_gesture:
+                        gesture_frames += 1
+                    else:
+                        current_gesture = gesture
+                        gesture_frames = 1
 
-                    x, y, w, h = cv2.boundingRect(max_cnt)
-                    global_x = x + roi_x1
-                    global_y = y + roi_y1
+                    tracker.draw(frame, hand_landmarks)
 
-                    max_global_cX = max_local_cX + roi_x1
-                    max_global_cY = max_local_cY + roi_y1
+                    tip_x, tip_y = tracker.index_tip(hand_landmarks)
+                    tip_px = (int(tip_x * frame.shape[1]), int(tip_y * frame.shape[0]))
+                    cv2.circle(frame, tip_px, 8, (0, 255, 0), -1)
 
-                    screen_x, screen_y = from_roi_to_screen(
-                        max_local_cX, max_local_cY,
-                        roi_w, roi_h,
-                        SCREEN_WIDTH, SCREEN_HEIGHT
-                    )
+                    if gesture_frames == HOLD_FRAMES:
+                        # Жест только что активировался — выполняем одноразовое действие
+                        action = GESTURE_ACTIONS.get(gesture)
+                        if action == "click":
+                            mouse.click()
+                        elif action == "double_click":
+                            mouse.double_click()
 
-                    #print("Before mapping:", screen_x, screen_y)
+                    if gesture_frames >= HOLD_FRAMES:
+                        active_action = GESTURE_ACTIONS.get(gesture)
+                        if active_action == "move":
+                            mouse.move(tip_x, tip_y)
+                else:
+                    current_gesture = None
+                    gesture_frames = 0
+                    mouse.reset()
 
-                    x_cords.append(screen_x), y_cords.append(screen_y)
+                draw_status(frame, display_gesture, confidence, active_action)
 
-                    screen_x = int(sum(x_cords) / len(x_cords))
-                    screen_y = int(sum(y_cords) / len(y_cords))
+                cv2.imshow("GestuMouse", frame)
 
-                    #print("After mapping:", screen_x, screen_y)
+                key = cv2.waitKey(1) & 0xFF
+                if key == ord("q"):
+                    break
+    finally:
+        camera.release()
+        cv2.destroyAllWindows()
 
-                    cv2.rectangle(frame, (global_x, global_y), (global_x + w, global_y + h), (0, 255, 0), 3)
-                    cv2.circle(frame, (max_global_cX, max_global_cY), 5, (0, 255, 0), -1)
-                    #cv2.circle(frame, (screen_x, screen_y), 5, (0, 255, 0), -1)
-            else:
-                x_cords.clear()
-                y_cords.clear()
 
-            cv2.rectangle(frame, (roi_x1, roi_y1), (roi_x2, roi_y2), (255, 0, 0), 2)
-
-            #print(f"Кадр {frame_count} | Камера: ({max_global_cX}, {max_global_cY}) | Экран: ({screen_x}, {screen_y})")
-            #result_frame = cv2.bitwise_and(frame, frame, mask=full_mask_frame)
-
-            cv2.imshow('Camera', cv2.flip(frame,1))
-            frame_count += 1
-        else:
-            break
-
-        key = cv2.waitKey(1) & 0xFF
-        if key == ord('q'):
-            break
-
-camera.release()
-cv2.destroyAllWindows()
+if __name__ == "__main__":
+    main()
